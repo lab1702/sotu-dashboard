@@ -1,0 +1,7 @@
+duckdb
+pandas
+taipy
+textblob
+numpy
+textstat
+requests
