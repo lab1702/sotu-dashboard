@@ -1,4 +1,17 @@
+"""
+Presidential Speech Analysis Dashboard
+
+A Streamlit dashboard for analyzing presidential speeches with NLP features
+including sentiment analysis, readability metrics, topic modeling, emotion
+detection, named entity recognition, and more.
+"""
+
 import warnings
+import sys
+from pathlib import Path
+
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
 
 import duckdb
 import numpy as np
@@ -10,35 +23,40 @@ from textblob import TextBlob
 
 # Suppress ResourceWarning from cmudict
 warnings.filterwarnings("ignore", category=ResourceWarning, module="cmudict")
+warnings.filterwarnings("ignore", category=UserWarning)
 
-# Constants
-MAX_TEXT_LENGTH = 5000
-MTLD_THRESHOLD = 0.72
-MATTR_WINDOW_SIZE = 100
-SENTIMENT_POSITIVE_THRESHOLD = 0.1
-SENTIMENT_NEGATIVE_THRESHOLD = -0.1
-MTLD_MIN_LENGTH = 10
+# Import constants
+from utils.constants import (
+    MAX_TEXT_LENGTH,
+    MTLD_THRESHOLD,
+    MATTR_WINDOW_SIZE,
+    SENTIMENT_POSITIVE_THRESHOLD,
+    SENTIMENT_NEGATIVE_THRESHOLD,
+    MTLD_MIN_LENGTH,
+    COLORBLIND_PALETTE,
+    READABILITY_ORDER,
+    SENTIMENT_ORDER,
+    LEXICAL_ORDER,
+)
 
-# Colorblind-safe palette (Wong, 2011 - Nature Methods)
-COLORBLIND_PALETTE = [
-    "#0072B2",  # Blue
-    "#E69F00",  # Orange
-    "#009E73",  # Green
-    "#CC79A7",  # Pink
-    "#F0E442",  # Yellow
-    "#56B4E9",  # Sky Blue
-    "#D55E00",  # Vermillion
-    "#000000",  # Black
-]
+# Import view modules
+from views.word_analysis import render_word_analysis_tab
+from views.topics import render_topics_tab
+from views.linguistic import render_linguistic_tab
+from views.emotions import render_emotions_tab
+from views.entities import render_entities_tab
+from views.comparisons import render_comparisons_tab
+from views.search import render_search_tab
 
 
 def validate_text_input(text):
     """Validate and clean text input for analysis."""
     if pd.isna(text) or text == "":
         return ""
-    return (
-        str(text)[:MAX_TEXT_LENGTH] if len(str(text)) > MAX_TEXT_LENGTH else str(text)
-    )
+    text_str = str(text)
+    if MAX_TEXT_LENGTH is not None and len(text_str) > MAX_TEXT_LENGTH:
+        return text_str[:MAX_TEXT_LENGTH]
+    return text_str
 
 
 def calculate_sentiment(text):
@@ -324,10 +342,24 @@ if "word_count" in filtered_data.columns and len(filtered_data) > 0:
 if "name" in filtered_data.columns:
     st.sidebar.metric("Presidents", filtered_data["name"].nunique())
 
-# Main content with tabs
-tab1, tab2, tab3 = st.tabs(["Data Table", "Time Trends", "Distributions"])
+# Main content with tabs - 10 tabs as specified
+tab_names = [
+    "Data Table",
+    "Time Trends",
+    "Distributions",
+    "Word Analysis",
+    "Topics",
+    "Linguistic",
+    "Emotions",
+    "Entities",
+    "Comparisons",
+    "Search & Export"
+]
 
-with tab1:
+tabs = st.tabs(tab_names)
+
+# Tab 1: Data Table
+with tabs[0]:
     st.subheader("Speech Data")
     display_columns = [
         "year", "name", "title", "speech_type", "word_count", "party",
@@ -336,7 +368,8 @@ with tab1:
     available_columns = [col for col in display_columns if col in filtered_data.columns]
     st.dataframe(filtered_data[available_columns], use_container_width=True, height=600)
 
-with tab2:
+# Tab 2: Time Trends
+with tabs[1]:
     col1, col2 = st.columns(2)
     chart_data = filtered_data[filtered_data["date"] != "Unknown"] if "date" in filtered_data.columns else filtered_data
     use_color = "name" in chart_data.columns and len(selected_presidents) > 0
@@ -387,7 +420,8 @@ with tab2:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-with tab3:
+# Tab 3: Distributions
+with tabs[2]:
     col1, col2 = st.columns(2)
     use_color = "name" in filtered_data.columns and len(selected_presidents) > 0
 
@@ -418,13 +452,12 @@ with tab3:
             st.plotly_chart(fig, use_container_width=True)
 
         if "readability_category" in filtered_data.columns:
-            readability_order = ["Very Easy", "Easy", "Fairly Easy", "Standard", "Fairly Difficult", "Difficult", "Very Difficult"]
             if use_color:
                 rows = []
                 for president in selected_presidents:
                     president_data = filtered_data[filtered_data["name"] == president]
                     counts = president_data["readability_category"].value_counts()
-                    for cat in readability_order:
+                    for cat in READABILITY_ORDER:
                         rows.append({"readability_category": cat, "count": counts.get(cat, 0), "name": president})
                 readability_df = pd.DataFrame(rows)
                 fig = px.bar(
@@ -435,8 +468,8 @@ with tab3:
             else:
                 counts = filtered_data["readability_category"].value_counts()
                 readability_df = pd.DataFrame({
-                    "readability_category": readability_order,
-                    "count": [counts.get(cat, 0) for cat in readability_order]
+                    "readability_category": READABILITY_ORDER,
+                    "count": [counts.get(cat, 0) for cat in READABILITY_ORDER]
                 })
                 fig = px.bar(readability_df, x="readability_category", y="count", title="Readability Distribution")
             fig.update_layout(xaxis_title="Readability Category", yaxis_title="Count")
@@ -444,13 +477,12 @@ with tab3:
 
     with col2:
         if "sentiment_category" in filtered_data.columns:
-            sentiment_order = ["Positive", "Neutral", "Negative"]
             if use_color:
                 rows = []
                 for president in selected_presidents:
                     president_data = filtered_data[filtered_data["name"] == president]
                     counts = president_data["sentiment_category"].value_counts()
-                    for cat in sentiment_order:
+                    for cat in SENTIMENT_ORDER:
                         rows.append({"sentiment_category": cat, "count": counts.get(cat, 0), "name": president})
                 sentiment_df = pd.DataFrame(rows)
                 fig = px.bar(
@@ -461,21 +493,20 @@ with tab3:
             else:
                 counts = filtered_data["sentiment_category"].value_counts()
                 sentiment_df = pd.DataFrame({
-                    "sentiment_category": sentiment_order,
-                    "count": [counts.get(cat, 0) for cat in sentiment_order]
+                    "sentiment_category": SENTIMENT_ORDER,
+                    "count": [counts.get(cat, 0) for cat in SENTIMENT_ORDER]
                 })
                 fig = px.bar(sentiment_df, x="sentiment_category", y="count", title="Sentiment Distribution")
             fig.update_layout(xaxis_title="Sentiment Category", yaxis_title="Count")
             st.plotly_chart(fig, use_container_width=True)
 
         if "lexical_diversity_category" in filtered_data.columns:
-            lexical_order = ["Very High", "High", "Moderate", "Low", "Very Low"]
             if use_color:
                 rows = []
                 for president in selected_presidents:
                     president_data = filtered_data[filtered_data["name"] == president]
                     counts = president_data["lexical_diversity_category"].value_counts()
-                    for cat in lexical_order:
+                    for cat in LEXICAL_ORDER:
                         rows.append({"lexical_diversity_category": cat, "count": counts.get(cat, 0), "name": president})
                 lexical_df = pd.DataFrame(rows)
                 fig = px.bar(
@@ -486,9 +517,37 @@ with tab3:
             else:
                 counts = filtered_data["lexical_diversity_category"].value_counts()
                 lexical_df = pd.DataFrame({
-                    "lexical_diversity_category": lexical_order,
-                    "count": [counts.get(cat, 0) for cat in lexical_order]
+                    "lexical_diversity_category": LEXICAL_ORDER,
+                    "count": [counts.get(cat, 0) for cat in LEXICAL_ORDER]
                 })
                 fig = px.bar(lexical_df, x="lexical_diversity_category", y="count", title="Lexical Diversity Distribution")
             fig.update_layout(xaxis_title="Lexical Diversity Category", yaxis_title="Count")
             st.plotly_chart(fig, use_container_width=True)
+
+# Tab 4: Word Analysis
+with tabs[3]:
+    render_word_analysis_tab(speech_data, filtered_data)
+
+# Tab 5: Topics
+with tabs[4]:
+    render_topics_tab(speech_data, filtered_data)
+
+# Tab 6: Linguistic Patterns
+with tabs[5]:
+    render_linguistic_tab(speech_data, filtered_data)
+
+# Tab 7: Emotions
+with tabs[6]:
+    render_emotions_tab(speech_data, filtered_data)
+
+# Tab 8: Named Entities
+with tabs[7]:
+    render_entities_tab(speech_data, filtered_data)
+
+# Tab 9: Comparisons
+with tabs[8]:
+    render_comparisons_tab(speech_data, filtered_data)
+
+# Tab 10: Search & Export
+with tabs[9]:
+    render_search_tab(speech_data, filtered_data)
