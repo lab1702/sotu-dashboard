@@ -1,6 +1,7 @@
 duckdb
 pandas
-taipy
+streamlit
+plotly
 textblob
 numpy
 textstat

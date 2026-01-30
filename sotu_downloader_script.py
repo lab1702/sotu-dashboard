@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Presidential Speech Downloader
-Download all presidential speeches with comprehensive metadata from Miller Center API
+Download all presidential speeches with comprehensive metadata from Miller Center
 """
 
 import argparse
 import json
 import re
-import time
+import tarfile
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -17,7 +18,7 @@ import requests
 
 class PresidentialSpeechDownloader:
     def __init__(self):
-        self.api_endpoint = "https://api.millercenter.org/speeches"
+        self.archive_url = "https://data.millercenter.org/miller_center_speeches.tgz"
         self.presidents_data = self._load_presidents_data()
 
     def _load_presidents_data(self) -> Dict:
@@ -296,133 +297,76 @@ class PresidentialSpeechDownloader:
         }
 
     def download_all_speeches(self) -> List[Dict]:
-        """Download all speeches from Miller Center API with pagination"""
-        print("Downloading all presidential speeches from Miller Center API...")
-        print("Fetching initial batch to determine total count...")
+        """Download all speeches from Miller Center data archive"""
+        print("Downloading presidential speeches archive from Miller Center...")
+        print(f"Source: {self.archive_url}")
 
         all_speeches = []
 
-        response = requests.post(url=self.api_endpoint)
+        # Download the archive
+        response = requests.get(self.archive_url, stream=True)
         if response.status_code != 200:
-            raise Exception(f"API request failed with status {response.status_code}")
+            raise Exception(f"Download failed with status {response.status_code}")
 
-        data = response.json()
-        all_speeches.extend(data["Items"])
+        # Get file size for progress
+        total_size = int(response.headers.get("content-length", 0))
+        downloaded = 0
 
-        # Estimate total count based on pagination pattern
-        # The API doesn't give us total count, so we estimate from first batch size
-        estimated_total = self._estimate_total_speeches(data)
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".tgz") as tmp_file:
+            tmp_path = tmp_file.name
+            for chunk in response.iter_content(chunk_size=8192):
+                tmp_file.write(chunk)
+                downloaded += len(chunk)
+                if total_size > 0:
+                    percent = (downloaded / total_size) * 100
+                    print(f"\rDownloading: {percent:.1f}% ({downloaded // 1024} KB)", end="", flush=True)
 
-        print(
-            f"Downloaded {len(data['Items'])} speeches (estimated total: ~{estimated_total})"
-        )
+        print(f"\n✅ Archive downloaded ({downloaded // 1024} KB)")
 
-        # Handle pagination with progress tracking
-        batch_count = 1
-        while "LastEvaluatedKey" in data:
-            time.sleep(0.5)  # Rate limiting
+        # Extract and parse JSON files
+        print("Extracting and parsing speeches...")
+        with tarfile.open(tmp_path, "r:gz") as tar:
+            members = [m for m in tar.getmembers() if m.name.endswith(".json")]
+            total_files = len(members)
+            print(f"Found {total_files} speech files")
 
-            parameters = {"LastEvaluatedKey": data["LastEvaluatedKey"]["doc_name"]}
-            response = requests.post(url=self.api_endpoint, params=parameters)
+            for i, member in enumerate(members):
+                if (i + 1) % 100 == 0 or i == total_files - 1:
+                    print(f"\rProcessing: {i + 1}/{total_files} speeches", end="", flush=True)
 
-            if response.status_code != 200:
-                print(
-                    f"Warning: Pagination request failed with status {response.status_code}"
-                )
-                break
+                f = tar.extractfile(member)
+                if f:
+                    try:
+                        speech_data = json.load(f)
+                        all_speeches.append(speech_data)
+                    except json.JSONDecodeError:
+                        print(f"\nWarning: Could not parse {member.name}")
 
-            data = response.json()
-            all_speeches.extend(data["Items"])
-            batch_count += 1
+        # Clean up temp file
+        Path(tmp_path).unlink()
 
-            # Calculate progress percentage
-            current_count = len(all_speeches)
-            if estimated_total > 0:
-                progress_percent = min((current_count / estimated_total) * 100, 100)
-                print(
-                    f"Downloaded {len(data['Items'])} more speeches... Total: {current_count} ({progress_percent:.1f}% complete)"
-                )
-            else:
-                print(
-                    f"Downloaded {len(data['Items'])} more speeches... Total: {current_count}"
-                )
-
-        final_count = len(all_speeches)
-        print(f"\n✅ Download complete! Total speeches: {final_count}")
-
-        # Update our estimate for future runs
-        if final_count != estimated_total:
-            print(
-                f"   (Actual total was {final_count}, estimated was {estimated_total})"
-            )
-
+        print(f"\n✅ Download complete! Total speeches: {len(all_speeches)}")
         return all_speeches
 
-    def _estimate_total_speeches(self, first_batch_data: Dict) -> int:
-        """Estimate total number of speeches based on first batch"""
-        # Miller Center API typically returns batches of 40-50 speeches
-        # We can estimate based on the pattern, but this is just an approximation
-        first_batch_size = len(first_batch_data.get("Items", []))
-
-        # If we have a LastEvaluatedKey, there are more batches
-        if "LastEvaluatedKey" in first_batch_data:
-            # Conservative estimate: assume 15-20 batches total based on historical data
-            # This is just for progress indication, not critical for functionality
-            estimated_batches = 18  # This gives us roughly 700-900 total speeches
-            return first_batch_size * estimated_batches
-        else:
-            # Only one batch
-            return first_batch_size
-
-    def extract_date_from_speech(self, speech: Dict) -> Optional[Tuple[int, str]]:
+    def extract_date_from_speech(self, speech: Dict) -> Tuple[Optional[int], Optional[str]]:
         """Extract year and date from speech data"""
-        # Try different date fields and formats
-        date_fields = ["date", "speech_date", "delivered"]
-        date_str = None
-
-        for field in date_fields:
-            if field in speech and speech[field]:
-                date_str = speech[field]
-                break
-
-        if not date_str:
-            # Try to extract from title or doc_name
-            title = speech.get("title", "")
-            doc_name = speech.get("doc_name", "")
-
-            # Look for date patterns in title
-            date_pattern = r"(\d{4})"
-            match = re.search(date_pattern, title + " " + doc_name)
-            if match:
-                year = int(match.group(1))
-                return year, f"{year}-01-01"
+        date_str = speech.get("date", "")
 
         if date_str:
-            # Parse various date formats
-            date_patterns = [
-                r"(\d{4})-(\d{1,2})-(\d{1,2})",  # YYYY-MM-DD
-                r"(\d{1,2})/(\d{1,2})/(\d{4})",  # MM/DD/YYYY
-                r"(\w+)\s+(\d{1,2}),?\s+(\d{4})",  # Month DD, YYYY
-                r"(\d{4})",  # Just year
-            ]
+            # Handle ISO format: "1863-11-19T13:03:58-04:56"
+            iso_match = re.match(r"(\d{4})-(\d{2})-(\d{2})", date_str)
+            if iso_match:
+                year = int(iso_match.group(1))
+                date_only = f"{iso_match.group(1)}-{iso_match.group(2)}-{iso_match.group(3)}"
+                return year, date_only
 
-            for pattern in date_patterns:
-                match = re.search(pattern, date_str)
-                if match:
-                    if len(match.groups()) == 1:  # Just year
-                        year = int(match.group(1))
-                        return year, date_str
-                    elif len(match.groups()) == 3:
-                        try:
-                            if pattern == date_patterns[0]:  # YYYY-MM-DD
-                                year = int(match.group(1))
-                            elif pattern == date_patterns[1]:  # MM/DD/YYYY
-                                year = int(match.group(3))
-                            else:  # Month DD, YYYY
-                                year = int(match.group(3))
-                            return year, date_str
-                        except ValueError:
-                            continue
+        # Fallback: try to extract from title
+        title = speech.get("title", "")
+        year_match = re.search(r"(\d{4})", title)
+        if year_match:
+            year = int(year_match.group(1))
+            return year, f"{year}-01-01"
 
         return None, None
 
@@ -495,7 +439,7 @@ class PresidentialSpeechDownloader:
         return processed_speeches
 
     def enhance_speech_metadata(self, speech: Dict) -> Dict:
-        """Add comprehensive metadata to speech data"""
+        """Add comprehensive metadata to speech data in flat format for dashboard compatibility"""
         president_name = speech.get("president", "")
         president_name = self._normalize_president_name(president_name)
 
@@ -504,49 +448,48 @@ class PresidentialSpeechDownloader:
         year = speech.get("extracted_year")
         date_str = speech.get("extracted_date")
         speech_type = speech.get("speech_type", "Unknown")
+        transcript = speech.get("transcript", "")
 
-        enhanced_metadata = {
-            "download_info": {
-                "downloaded_at": datetime.now().isoformat(),
-                "source": "Miller Center API",
-                "api_endpoint": self.api_endpoint,
-            },
-            "speech_metadata": {
-                "year": year,
-                "date": date_str,
-                "title": speech.get("title", ""),
-                "doc_name": speech.get("doc_name", ""),
-                "speech_type": speech_type,
-                "miller_center_url": f"https://millercenter.org/the-presidency/presidential-speeches/{speech.get('doc_name', '')}",
-            },
-            "president_metadata": {
-                "name": president_name,
-                "presidential_number": president_info.get("number"),
-                "party": president_info.get("party"),
-                "terms_served": president_info.get("term"),
-                "years_in_office": president_info.get("years"),
-                "administration": f"{president_name} Administration",
-            },
-            "content": {
-                "transcript": speech.get("transcript", speech.get("text", "")),
-                "word_count": (
-                    len(speech.get("transcript", speech.get("text", "")).split())
-                    if speech.get("transcript") or speech.get("text")
-                    else 0
-                ),
-            },
-            "historical_context": self._get_historical_context(year, president_name),
-            "classification": {
-                "is_state_of_union": speech_type == "State of the Union",
-                "is_inaugural": speech_type == "Inaugural Address",
-                "is_farewell": speech_type == "Farewell Address",
-                "is_campaign": speech_type == "Campaign Speech",
-                "is_address_to_congress": speech_type == "Address to Congress",
-                "is_address_to_nation": speech_type == "Address to the Nation",
-            },
+        # Build Miller Center URL from doc_name
+        doc_name = speech.get("doc_name", "")
+        if doc_name.startswith("/"):
+            miller_url = f"https://millercenter.org{doc_name}"
+        else:
+            miller_url = speech.get("url", "")
+
+        # Get historical context
+        historical = self._get_historical_context(year, president_name)
+
+        # Return flat structure compatible with dashboard DuckDB queries
+        return {
+            # Core fields expected by dashboard
+            "name": president_name,
+            "year": year,
+            "date": date_str,
+            "title": speech.get("title", ""),
+            "transcript": transcript,
+            "word_count": len(transcript.split()) if transcript else 0,
+            "speech_type": speech_type,
+            "party": president_info.get("party"),
+            "decade": historical.get("decade"),
+            # Additional metadata
+            "presidential_number": president_info.get("number"),
+            "terms_served": president_info.get("term"),
+            "years_in_office": president_info.get("years"),
+            "historical_period": historical.get("period"),
+            "miller_center_url": miller_url,
+            "introduction": speech.get("introduction", ""),
+            # Classification flags
+            "is_state_of_union": speech_type == "State of the Union",
+            "is_inaugural": speech_type == "Inaugural Address",
+            "is_farewell": speech_type == "Farewell Address",
+            "is_campaign": speech_type == "Campaign Speech",
+            "is_address_to_congress": speech_type == "Address to Congress",
+            "is_address_to_nation": speech_type == "Address to the Nation",
+            # Download info
+            "source": "Miller Center Data Portal",
+            "downloaded_at": datetime.now().isoformat(),
         }
-
-        return enhanced_metadata
 
     def _normalize_president_name(self, name: str) -> str:
         """Normalize president name variations"""
@@ -614,11 +557,11 @@ class PresidentialSpeechDownloader:
         for speech in speeches:
             enhanced_speech = self.enhance_speech_metadata(speech)
 
-            # Create safe filename
-            year = enhanced_speech["speech_metadata"]["year"] or "Unknown"
-            president = enhanced_speech["president_metadata"]["name"] or "Unknown"
-            speech_type = enhanced_speech["speech_metadata"]["speech_type"]
-            title = enhanced_speech["speech_metadata"]["title"]
+            # Create safe filename using flat structure
+            year = enhanced_speech["year"] or "Unknown"
+            president = enhanced_speech["name"] or "Unknown"
+            speech_type = enhanced_speech["speech_type"]
+            title = enhanced_speech["title"]
 
             safe_president = re.sub(r"[^\w\s-]", "", president).strip()
             safe_title = re.sub(r"[^\w\s-]", "", title).strip()[
@@ -646,8 +589,8 @@ class PresidentialSpeechDownloader:
                     "president": president,
                     "title": title,
                     "speech_type": speech_type,
-                    "word_count": enhanced_speech["content"]["word_count"],
-                    "party": enhanced_speech["president_metadata"]["party"],
+                    "word_count": enhanced_speech["word_count"],
+                    "party": enhanced_speech["party"],
                     "filename": filename,
                 }
             )

@@ -1,14 +1,11 @@
-import glob
-import os
 import warnings
-from datetime import datetime
 
 import duckdb
 import numpy as np
 import pandas as pd
+import plotly.express as px
+import streamlit as st
 import textstat
-from taipy import Config
-from taipy.gui import Gui, Markdown
 from textblob import TextBlob
 
 # Suppress ResourceWarning from cmudict
@@ -22,6 +19,18 @@ SENTIMENT_POSITIVE_THRESHOLD = 0.1
 SENTIMENT_NEGATIVE_THRESHOLD = -0.1
 MTLD_MIN_LENGTH = 10
 
+# Colorblind-safe palette (Wong, 2011 - Nature Methods)
+COLORBLIND_PALETTE = [
+    "#0072B2",  # Blue
+    "#E69F00",  # Orange
+    "#009E73",  # Green
+    "#CC79A7",  # Pink
+    "#F0E442",  # Yellow
+    "#56B4E9",  # Sky Blue
+    "#D55E00",  # Vermillion
+    "#000000",  # Black
+]
+
 
 def validate_text_input(text):
     """Validate and clean text input for analysis."""
@@ -32,89 +41,53 @@ def validate_text_input(text):
     )
 
 
-def validate_dataframe_column(df, column_name):
-    """Check if a column exists in the dataframe."""
-    return column_name in df.columns and not df[column_name].empty
-
-
-# Data loading and querying functions
 def calculate_sentiment(text):
-    """Calculate sentiment polarity and subjectivity for a text.
-
-    Args:
-        text: Input text string to analyze
-
-    Returns:
-        tuple: (polarity: float, subjectivity: float)
-    """
+    """Calculate sentiment polarity and subjectivity for a text."""
     try:
         text_sample = validate_text_input(text)
         if not text_sample:
             return 0.0, 0.0
-
         blob = TextBlob(text_sample)
         return blob.sentiment.polarity, blob.sentiment.subjectivity
-    except (AttributeError, TypeError, ValueError) as e:
+    except (AttributeError, TypeError, ValueError):
         return 0.0, 0.0
 
 
 def calculate_readability(text):
-    """Calculate readability scores for a text.
-
-    Args:
-        text: Input text string to analyze
-
-    Returns:
-        tuple: (flesch_reading_ease, flesch_kincaid_grade, gunning_fog, coleman_liau)
-    """
+    """Calculate readability scores for a text."""
     try:
         text_sample = validate_text_input(text)
         if not text_sample:
             return 0.0, 0.0, 0.0, 0.0
-
-        # Calculate various readability scores
         flesch_reading_ease = textstat.flesch_reading_ease(text_sample)
         flesch_kincaid_grade = textstat.flesch_kincaid_grade(text_sample)
         gunning_fog = textstat.gunning_fog(text_sample)
         coleman_liau = textstat.coleman_liau_index(text_sample)
-
         return flesch_reading_ease, flesch_kincaid_grade, gunning_fog, coleman_liau
-    except (AttributeError, TypeError, ValueError) as e:
+    except (AttributeError, TypeError, ValueError):
         return 0.0, 0.0, 0.0, 0.0
 
 
 def calculate_lexical_diversity(text):
-    """Calculate lexical diversity scores for a text.
+    """Calculate lexical diversity scores for a text."""
+    import re
 
-    Args:
-        text: Input text string to analyze
-
-    Returns:
-        tuple: (ttr, mattr, mtld) - Type-Token Ratio, Moving Average TTR, Measure of Textual Lexical Diversity
-    """
     try:
         text_sample = validate_text_input(text)
         if not text_sample:
             return 0.0, 0.0, 0.0
 
-        # Clean and tokenize text
-        import re
-
-        # Remove punctuation and convert to lowercase
         words = re.findall(r"\b[a-zA-Z]+\b", text_sample.lower())
-
         if len(words) == 0:
             return 0.0, 0.0, 0.0
 
-        # Calculate metrics
         total_words = len(words)
         unique_words = len(set(words))
 
-        # Type-Token Ratio (TTR) - basic lexical diversity
+        # Type-Token Ratio (TTR)
         ttr = unique_words / total_words if total_words > 0 else 0.0
 
-        # Moving Average Type-Token Ratio (MATTR) - more stable for longer texts
-        # Calculate TTR for moving windows
+        # Moving Average Type-Token Ratio (MATTR)
         window_size = min(MATTR_WINDOW_SIZE, total_words)
         if total_words >= window_size:
             ttrs = []
@@ -127,32 +100,26 @@ def calculate_lexical_diversity(text):
             mattr = ttr
 
         # Measure of Textual Lexical Diversity (MTLD)
-        # Calculate forward and backward MTLD and take average
         def calculate_mtld_direction(word_list):
             if len(word_list) < MTLD_MIN_LENGTH:
                 return len(word_list)
-
             factors = 0
             start = 0
-
             while start < len(word_list):
                 unique_in_segment = set()
                 for i in range(start, len(word_list)):
                     unique_in_segment.add(word_list[i])
                     current_ttr = len(unique_in_segment) / (i - start + 1)
-
                     if current_ttr <= MTLD_THRESHOLD:
                         factors += 1
                         start = i + 1
                         break
                 else:
-                    # Reached end without hitting threshold
                     remaining_length = len(word_list) - start
                     if remaining_length > 0:
                         remaining_ttr = len(set(word_list[start:])) / remaining_length
                         factors += remaining_ttr / MTLD_THRESHOLD
                     break
-
             return len(word_list) / factors if factors > 0 else len(word_list)
 
         mtld_forward = calculate_mtld_direction(words)
@@ -160,52 +127,40 @@ def calculate_lexical_diversity(text):
         mtld = (mtld_forward + mtld_backward) / 2
 
         return round(ttr, 4), round(mattr, 4), round(mtld, 2)
-    except (AttributeError, TypeError, ValueError, ZeroDivisionError) as e:
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
         return 0.0, 0.0, 0.0
 
 
+@st.cache_data
 def load_speech_data():
-    """Load presidential speech data using DuckDB.
-
-    Returns:
-        pd.DataFrame: Processed speech data with analysis columns
-    """
+    """Load presidential speech data using DuckDB."""
     conn = duckdb.connect(":memory:")
-
-    # Use the exact query pattern from DATA.md
-    query = "SELECT unnest(COLUMNS(*)) FROM 'presidential_speeches/[0-9]*.json'"
+    query = "SELECT * FROM 'presidential_speeches/[0-9]*.json'"
     try:
         result = conn.execute(query)
         df = result.df()
 
-        # Convert date field to just date (remove time component)
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime(
                 "%Y-%m-%d"
             )
-            # Replace NaT values with empty string
             df["date"] = df["date"].fillna("Unknown")
 
-        # Convert nullable integers to regular integers
         for col in df.columns:
             if df[col].dtype == "Int64":
                 df[col] = df[col].fillna(0).astype(int)
 
-        # Convert boolean columns to strings for better Taipy compatibility
         bool_cols = df.select_dtypes(include=["bool"]).columns
         for col in bool_cols:
             df[col] = df[col].astype(str)
 
         # Add sentiment analysis
-        print("Calculating sentiment scores...")
         if "transcript" in df.columns:
             sentiment_data = df["transcript"].apply(calculate_sentiment)
             df["sentiment_polarity"] = sentiment_data.apply(lambda x: round(x[0], 3))
             df["sentiment_subjectivity"] = sentiment_data.apply(
                 lambda x: round(x[1], 3)
             )
-
-            # Add sentiment category
             df["sentiment_category"] = df["sentiment_polarity"].apply(
                 lambda x: (
                     "Positive"
@@ -215,7 +170,6 @@ def load_speech_data():
             )
 
         # Add readability analysis
-        print("Calculating readability scores...")
         if "transcript" in df.columns:
             readability_data = df["transcript"].apply(calculate_readability)
             df["flesch_reading_ease"] = readability_data.apply(lambda x: round(x[0], 1))
@@ -224,8 +178,6 @@ def load_speech_data():
             )
             df["gunning_fog"] = readability_data.apply(lambda x: round(x[2], 1))
             df["coleman_liau"] = readability_data.apply(lambda x: round(x[3], 1))
-
-            # Add readability category based on Flesch Reading Ease
             df["readability_category"] = df["flesch_reading_ease"].apply(
                 lambda x: (
                     "Very Easy"
@@ -251,16 +203,11 @@ def load_speech_data():
             )
 
         # Add lexical diversity analysis
-        print("Calculating lexical diversity scores...")
         if "transcript" in df.columns:
             lexical_data = df["transcript"].apply(calculate_lexical_diversity)
-            df["ttr"] = lexical_data.apply(lambda x: x[0])  # Type-Token Ratio
-            df["mattr"] = lexical_data.apply(lambda x: x[1])  # Moving Average TTR
-            df["mtld"] = lexical_data.apply(
-                lambda x: x[2]
-            )  # Measure of Textual Lexical Diversity
-
-            # Add lexical diversity category based on TTR
+            df["ttr"] = lexical_data.apply(lambda x: x[0])
+            df["mattr"] = lexical_data.apply(lambda x: x[1])
+            df["mtld"] = lexical_data.apply(lambda x: x[2])
             df["lexical_diversity_category"] = df["ttr"].apply(
                 lambda x: (
                     "Very High"
@@ -277,436 +224,271 @@ def load_speech_data():
                 )
             )
 
-        # Sort by date chronologically for proper time series visualization
         if "date" in df.columns:
             df = df.sort_values("date").reset_index(drop=True)
 
         conn.close()
         return df
     except Exception as e:
-        print(f"Error loading data: {e}")
+        st.error(f"Error loading data: {e}")
         conn.close()
         return pd.DataFrame()
 
 
-def filter_by_president(df, president_name=None):
-    """Filter speeches by president.
-
-    Args:
-        df: DataFrame to filter
-        president_name: Name of president to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not president_name or president_name == "All":
-        return df
-    return (
-        df[df["name"] == president_name]
-        if validate_dataframe_column(df, "name")
-        else df
-    )
-
-
-def filter_by_decade(df, decade=None):
-    """Filter speeches by decade.
-
-    Args:
-        df: DataFrame to filter
-        decade: Decade string to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not decade or decade == "All":
-        return df
-    return df[df["decade"] == decade] if "decade" in df.columns else df
-
-
-def filter_by_speech_type(df, speech_type=None):
-    """Filter speeches by speech type.
-
-    Args:
-        df: DataFrame to filter
-        speech_type: Speech type to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not speech_type or speech_type == "All":
-        return df
-    return df[df["speech_type"] == speech_type] if "speech_type" in df.columns else df
-
-
-def filter_by_party(df, party=None):
-    """Filter speeches by party.
-
-    Args:
-        df: DataFrame to filter
-        party: Political party to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not party or party == "All":
-        return df
-    return df[df["party"] == party] if "party" in df.columns else df
-
-
-def filter_by_sentiment(df, sentiment=None):
-    """Filter speeches by sentiment category.
-
-    Args:
-        df: DataFrame to filter
-        sentiment: Sentiment category to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not sentiment or sentiment == "All":
-        return df
-    return (
-        df[df["sentiment_category"] == sentiment]
-        if "sentiment_category" in df.columns
-        else df
-    )
-
-
-def filter_by_readability(df, readability=None):
-    """Filter speeches by readability category.
-
-    Args:
-        df: DataFrame to filter
-        readability: Readability category to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not readability or readability == "All":
-        return df
-    return (
-        df[df["readability_category"] == readability]
-        if "readability_category" in df.columns
-        else df
-    )
-
-
-def filter_by_lexical_diversity(df, lexical_diversity=None):
-    """Filter speeches by lexical diversity category.
-
-    Args:
-        df: DataFrame to filter
-        lexical_diversity: Lexical diversity category to filter by
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
-    if df.empty or not lexical_diversity or lexical_diversity == "All":
-        return df
-    return (
-        df[df["lexical_diversity_category"] == lexical_diversity]
-        if "lexical_diversity_category" in df.columns
-        else df
-    )
-
-
-def apply_all_filters(
-    df, president, decade, speech_type, party, sentiment, readability, lexical_diversity
-):
-    """Apply all filters to the dataframe.
-
-    Args:
-        df: Source dataframe
-        president: President filter value
-        decade: Decade filter value
-        speech_type: Speech type filter value
-        party: Party filter value
-        sentiment: Sentiment filter value
-        readability: Readability filter value
-        lexical_diversity: Lexical diversity filter value
-
-    Returns:
-        pd.DataFrame: Filtered dataframe
-    """
+def apply_filters(df, presidents, decade, speech_type, party, sentiment, readability, lexical_diversity):
+    """Apply all filters to the dataframe."""
     filtered = df.copy()
-    filtered = filter_by_president(filtered, president)
-    filtered = filter_by_decade(filtered, decade)
-    filtered = filter_by_speech_type(filtered, speech_type)
-    filtered = filter_by_party(filtered, party)
-    filtered = filter_by_sentiment(filtered, sentiment)
-    filtered = filter_by_readability(filtered, readability)
-    filtered = filter_by_lexical_diversity(filtered, lexical_diversity)
+    if presidents and "name" in filtered.columns:
+        filtered = filtered[filtered["name"].isin(presidents)]
+    if decade != "All" and "decade" in filtered.columns:
+        filtered = filtered[filtered["decade"] == decade]
+    if speech_type != "All" and "speech_type" in filtered.columns:
+        filtered = filtered[filtered["speech_type"] == speech_type]
+    if party != "All" and "party" in filtered.columns:
+        filtered = filtered[filtered["party"] == party]
+    if sentiment != "All" and "sentiment_category" in filtered.columns:
+        filtered = filtered[filtered["sentiment_category"] == sentiment]
+    if readability != "All" and "readability_category" in filtered.columns:
+        filtered = filtered[filtered["readability_category"] == readability]
+    if lexical_diversity != "All" and "lexical_diversity_category" in filtered.columns:
+        filtered = filtered[filtered["lexical_diversity_category"] == lexical_diversity]
     return filtered
 
 
-def create_speech_type_summary(df):
-    """Create a summary dataframe for speech types chart.
-
-    Args:
-        df: Input dataframe
-
-    Returns:
-        pd.DataFrame: Summary with speech_type and count columns
-    """
-    if df.empty or "speech_type" not in df.columns:
-        return pd.DataFrame({"speech_type": [], "count": []})
-
-    summary = df["speech_type"].value_counts().reset_index()
-    summary.columns = ["speech_type", "count"]
-    return summary
-
-
-def calculate_statistics(df):
-    """Calculate statistics from dataframe.
-
-    Args:
-        df: Input dataframe
-
-    Returns:
-        tuple: (total_speeches, date_range, avg_word_count, presidents_count)
-    """
-    if df.empty:
-        return 0, "N/A", 0, 0
-
-    total = len(df)
-
-    # Calculate date range safely
-    if "date" in df.columns and not df["date"].isna().all():
-        valid_dates = df["date"][df["date"] != "Unknown"]
-        if len(valid_dates) > 0:
-            date_range = f"{valid_dates.min()} to {valid_dates.max()}"
-        else:
-            date_range = "N/A"
-    else:
-        date_range = "N/A"
-
-    # Calculate average word count safely
-    if "word_count" in df.columns and not df["word_count"].isna().all():
-        avg_words = int(df["word_count"].mean())
-    else:
-        avg_words = 0
-
-    # Calculate president count safely
-    if "name" in df.columns:
-        presidents = df["name"].nunique()
-    else:
-        presidents = 0
-
-    return total, date_range, avg_words, presidents
-
-
-# Initialize data
-print("Loading presidential speech data...")
-speech_data = load_speech_data()
-print(f"Loaded {len(speech_data)} speeches")
-
-# Get unique values for dropdowns
-presidents = (
-    ["All"] + sorted(speech_data["name"].unique().tolist())
-    if "name" in speech_data.columns
-    else ["All"]
-)
-decades = (
-    ["All"] + sorted(speech_data["decade"].unique().tolist())
-    if "decade" in speech_data.columns
-    else ["All"]
-)
-speech_types = (
-    ["All"] + sorted(speech_data["speech_type"].unique().tolist())
-    if "speech_type" in speech_data.columns
-    else ["All"]
-)
-parties = (
-    ["All"] + sorted([p for p in speech_data["party"].unique().tolist() if p])
-    if "party" in speech_data.columns
-    else ["All"]
-)
-sentiments = (
-    ["All"] + sorted(speech_data["sentiment_category"].unique().tolist())
-    if "sentiment_category" in speech_data.columns
-    else ["All"]
-)
-readabilities = (
-    ["All"] + sorted(speech_data["readability_category"].unique().tolist())
-    if "readability_category" in speech_data.columns
-    else ["All"]
-)
-lexical_diversities = (
-    ["All"] + sorted(speech_data["lexical_diversity_category"].unique().tolist())
-    if "lexical_diversity_category" in speech_data.columns
-    else ["All"]
+# Page config
+st.set_page_config(
+    page_title="Presidential Speech Analysis",
+    page_icon="🎤",
+    layout="wide"
 )
 
-# Dashboard state variables
-selected_president = "All"
-selected_decade = "All"
-selected_speech_type = "All"
-selected_party = "All"
-selected_sentiment = "All"
-selected_readability = "All"
-selected_lexical_diversity = "All"
-filtered_data = speech_data.copy()
+st.title("Presidential Speech Analysis Dashboard")
 
-# Calculate initial statistics
-total_speeches, date_range, avg_word_count, presidents_count = calculate_statistics(
-    filtered_data
+# Load data
+with st.spinner("Loading speech data..."):
+    speech_data = load_speech_data()
+
+if speech_data.empty:
+    st.error("No data loaded. Please check that presidential_speeches directory exists.")
+    st.stop()
+
+# Sidebar filters
+st.sidebar.header("Filters")
+
+presidents = sorted(speech_data["name"].unique().tolist()) if "name" in speech_data.columns else []
+selected_presidents = st.sidebar.multiselect("Presidents", presidents, placeholder="All Presidents")
+
+decades = ["All"] + sorted(speech_data["decade"].unique().tolist()) if "decade" in speech_data.columns else ["All"]
+selected_decade = st.sidebar.selectbox("Decade", decades)
+
+speech_types = ["All"] + sorted(speech_data["speech_type"].unique().tolist()) if "speech_type" in speech_data.columns else ["All"]
+selected_speech_type = st.sidebar.selectbox("Speech Type", speech_types)
+
+parties = ["All"] + sorted([p for p in speech_data["party"].unique().tolist() if p]) if "party" in speech_data.columns else ["All"]
+selected_party = st.sidebar.selectbox("Party", parties)
+
+sentiments = ["All"] + sorted(speech_data["sentiment_category"].unique().tolist()) if "sentiment_category" in speech_data.columns else ["All"]
+selected_sentiment = st.sidebar.selectbox("Sentiment", sentiments)
+
+readabilities = ["All"] + sorted(speech_data["readability_category"].unique().tolist()) if "readability_category" in speech_data.columns else ["All"]
+selected_readability = st.sidebar.selectbox("Readability", readabilities)
+
+lexical_diversities = ["All"] + sorted(speech_data["lexical_diversity_category"].unique().tolist()) if "lexical_diversity_category" in speech_data.columns else ["All"]
+selected_lexical_diversity = st.sidebar.selectbox("Lexical Diversity", lexical_diversities)
+
+# Apply filters
+filtered_data = apply_filters(
+    speech_data,
+    selected_presidents,
+    selected_decade,
+    selected_speech_type,
+    selected_party,
+    selected_sentiment,
+    selected_readability,
+    selected_lexical_diversity
 )
-speech_type_summary = create_speech_type_summary(filtered_data)
 
+# Sidebar statistics
+st.sidebar.markdown("---")
+st.sidebar.header("Statistics")
+st.sidebar.metric("Total Speeches", len(filtered_data))
 
-def update_dashboard_state(state):
-    """Update dashboard state after filter changes.
+if "date" in filtered_data.columns and len(filtered_data) > 0:
+    valid_dates = filtered_data["date"][filtered_data["date"] != "Unknown"]
+    if len(valid_dates) > 0:
+        st.sidebar.text(f"Date Range:\n{valid_dates.min()} to\n{valid_dates.max()}")
 
-    Args:
-        state: Taipy state object containing filter selections
-    """
-    state.filtered_data = apply_all_filters(
-        speech_data,
-        state.selected_president,
-        state.selected_decade,
-        state.selected_speech_type,
-        state.selected_party,
-        state.selected_sentiment,
-        state.selected_readability,
-        state.selected_lexical_diversity,
-    )
-    (
-        state.total_speeches,
-        state.date_range,
-        state.avg_word_count,
-        state.presidents_count,
-    ) = calculate_statistics(state.filtered_data)
-    state.speech_type_summary = create_speech_type_summary(state.filtered_data)
+if "word_count" in filtered_data.columns and len(filtered_data) > 0:
+    st.sidebar.metric("Avg Word Count", int(filtered_data["word_count"].mean()))
 
+if "name" in filtered_data.columns:
+    st.sidebar.metric("Presidents", filtered_data["name"].nunique())
 
-# Event handlers
-def on_president_change(state):
-    """Handle president selection change."""
-    update_dashboard_state(state)
+# Main content with tabs
+tab1, tab2, tab3 = st.tabs(["Data Table", "Time Trends", "Distributions"])
 
+with tab1:
+    st.subheader("Speech Data")
+    display_columns = [
+        "year", "name", "title", "speech_type", "word_count", "party",
+        "sentiment_category", "readability_category", "lexical_diversity_category", "ttr"
+    ]
+    available_columns = [col for col in display_columns if col in filtered_data.columns]
+    st.dataframe(filtered_data[available_columns], use_container_width=True, height=600)
 
-def on_decade_change(state):
-    """Handle decade selection change."""
-    update_dashboard_state(state)
+with tab2:
+    col1, col2 = st.columns(2)
+    chart_data = filtered_data[filtered_data["date"] != "Unknown"] if "date" in filtered_data.columns else filtered_data
+    use_color = "name" in chart_data.columns and len(selected_presidents) > 0
 
+    with col1:
+        if "date" in chart_data.columns and "word_count" in chart_data.columns:
+            fig = px.scatter(
+                chart_data,
+                x="date", y="word_count",
+                color="name" if use_color else None,
+                color_discrete_sequence=COLORBLIND_PALETTE,
+                title="Word Count Over Time",
+                hover_data=["name", "title"] if "name" in chart_data.columns else None
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-def on_speech_type_change(state):
-    """Handle speech type selection change."""
-    update_dashboard_state(state)
+        if "date" in chart_data.columns and "flesch_reading_ease" in chart_data.columns:
+            fig = px.scatter(
+                chart_data,
+                x="date", y="flesch_reading_ease",
+                color="name" if use_color else None,
+                color_discrete_sequence=COLORBLIND_PALETTE,
+                title="Readability Over Time (Flesch Score)",
+                hover_data=["name", "title"] if "name" in chart_data.columns else None
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
+    with col2:
+        if "date" in chart_data.columns and "sentiment_polarity" in chart_data.columns:
+            fig = px.scatter(
+                chart_data,
+                x="date", y="sentiment_polarity",
+                color="name" if use_color else None,
+                color_discrete_sequence=COLORBLIND_PALETTE,
+                title="Sentiment Over Time",
+                hover_data=["name", "title"] if "name" in chart_data.columns else None
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-def on_party_change(state):
-    """Handle party selection change."""
-    update_dashboard_state(state)
+        if "date" in chart_data.columns and "ttr" in chart_data.columns:
+            fig = px.scatter(
+                chart_data,
+                x="date", y="ttr",
+                color="name" if use_color else None,
+                color_discrete_sequence=COLORBLIND_PALETTE,
+                title="Lexical Diversity Over Time (TTR)",
+                hover_data=["name", "title"] if "name" in chart_data.columns else None
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
+with tab3:
+    col1, col2 = st.columns(2)
+    use_color = "name" in filtered_data.columns and len(selected_presidents) > 0
 
-def on_sentiment_change(state):
-    """Handle sentiment selection change."""
-    update_dashboard_state(state)
+    with col1:
+        if "speech_type" in filtered_data.columns:
+            speech_type_order = sorted(speech_data["speech_type"].unique().tolist())
+            if use_color:
+                rows = []
+                for president in selected_presidents:
+                    president_data = filtered_data[filtered_data["name"] == president]
+                    counts = president_data["speech_type"].value_counts()
+                    for cat in speech_type_order:
+                        rows.append({"speech_type": cat, "count": counts.get(cat, 0), "name": president})
+                speech_type_df = pd.DataFrame(rows)
+                fig = px.bar(
+                    speech_type_df, x="speech_type", y="count", color="name",
+                    color_discrete_sequence=COLORBLIND_PALETTE,
+                    title="Speech Types Distribution", barmode="group"
+                )
+            else:
+                counts = filtered_data["speech_type"].value_counts()
+                speech_type_df = pd.DataFrame({
+                    "speech_type": speech_type_order,
+                    "count": [counts.get(cat, 0) for cat in speech_type_order]
+                })
+                fig = px.bar(speech_type_df, x="speech_type", y="count", title="Speech Types Distribution")
+            fig.update_layout(xaxis_title="Speech Type", yaxis_title="Count")
+            st.plotly_chart(fig, use_container_width=True)
 
+        if "readability_category" in filtered_data.columns:
+            readability_order = ["Very Easy", "Easy", "Fairly Easy", "Standard", "Fairly Difficult", "Difficult", "Very Difficult"]
+            if use_color:
+                rows = []
+                for president in selected_presidents:
+                    president_data = filtered_data[filtered_data["name"] == president]
+                    counts = president_data["readability_category"].value_counts()
+                    for cat in readability_order:
+                        rows.append({"readability_category": cat, "count": counts.get(cat, 0), "name": president})
+                readability_df = pd.DataFrame(rows)
+                fig = px.bar(
+                    readability_df, x="readability_category", y="count", color="name",
+                    color_discrete_sequence=COLORBLIND_PALETTE,
+                    title="Readability Distribution", barmode="group"
+                )
+            else:
+                counts = filtered_data["readability_category"].value_counts()
+                readability_df = pd.DataFrame({
+                    "readability_category": readability_order,
+                    "count": [counts.get(cat, 0) for cat in readability_order]
+                })
+                fig = px.bar(readability_df, x="readability_category", y="count", title="Readability Distribution")
+            fig.update_layout(xaxis_title="Readability Category", yaxis_title="Count")
+            st.plotly_chart(fig, use_container_width=True)
 
-def on_readability_change(state):
-    """Handle readability selection change."""
-    update_dashboard_state(state)
+    with col2:
+        if "sentiment_category" in filtered_data.columns:
+            sentiment_order = ["Positive", "Neutral", "Negative"]
+            if use_color:
+                rows = []
+                for president in selected_presidents:
+                    president_data = filtered_data[filtered_data["name"] == president]
+                    counts = president_data["sentiment_category"].value_counts()
+                    for cat in sentiment_order:
+                        rows.append({"sentiment_category": cat, "count": counts.get(cat, 0), "name": president})
+                sentiment_df = pd.DataFrame(rows)
+                fig = px.bar(
+                    sentiment_df, x="sentiment_category", y="count", color="name",
+                    color_discrete_sequence=COLORBLIND_PALETTE,
+                    title="Sentiment Distribution", barmode="group"
+                )
+            else:
+                counts = filtered_data["sentiment_category"].value_counts()
+                sentiment_df = pd.DataFrame({
+                    "sentiment_category": sentiment_order,
+                    "count": [counts.get(cat, 0) for cat in sentiment_order]
+                })
+                fig = px.bar(sentiment_df, x="sentiment_category", y="count", title="Sentiment Distribution")
+            fig.update_layout(xaxis_title="Sentiment Category", yaxis_title="Count")
+            st.plotly_chart(fig, use_container_width=True)
 
-
-def on_lexical_diversity_change(state):
-    """Handle lexical diversity selection change."""
-    update_dashboard_state(state)
-
-
-# Dashboard layout
-
-page = """
-# Presidential Speech Analysis Dashboard
-
-<|layout|columns=300px 1fr|
-<|part|class_name=sidebar|
-## Filters
-
-**President**
-<|{selected_president}|selector|lov={presidents}|dropdown|on_change=on_president_change|>
-
-**Decade** 
-<|{selected_decade}|selector|lov={decades}|dropdown|on_change=on_decade_change|>
-
-**Speech Type**
-<|{selected_speech_type}|selector|lov={speech_types}|dropdown|on_change=on_speech_type_change|>
-
-**Party**
-<|{selected_party}|selector|lov={parties}|dropdown|on_change=on_party_change|>
-
-**Sentiment**
-<|{selected_sentiment}|selector|lov={sentiments}|dropdown|on_change=on_sentiment_change|>
-
-**Readability**
-<|{selected_readability}|selector|lov={readabilities}|dropdown|on_change=on_readability_change|>
-
-**Lexical Diversity**
-<|{selected_lexical_diversity}|selector|lov={lexical_diversities}|dropdown|on_change=on_lexical_diversity_change|>
-
----
-
-## Statistics
-**Total Speeches**: <|{total_speeches}|text|>
-
-**Date Range**: <|{date_range}|text|>
-
-**Avg Word Count**: <|{avg_word_count}|text|>
-
-**Presidents**: <|{presidents_count}|text|>
-|>
-
-<|part|class_name=main|
-## Speech Data
-<|{filtered_data}|table|page_size=15|columns=year;name;title;speech_type;word_count;party;sentiment_category;readability_category;lexical_diversity_category;ttr|>
-
-## Word Count Over Time
-<|{filtered_data}|chart|x=date|y=word_count|type=scatter|title=Speech Word Count Over Time|height=400px|>
-
-## Sentiment Over Time
-<|{filtered_data}|chart|x=date|y=sentiment_polarity|type=scatter|title=Speech Sentiment Over Time|height=400px|>
-
-## Readability Over Time
-<|{filtered_data}|chart|x=date|y=flesch_reading_ease|type=scatter|title=Speech Readability Over Time (Flesch Score)|height=400px|>
-
-## Lexical Diversity Over Time
-<|{filtered_data}|chart|x=date|y=ttr|type=scatter|title=Speech Lexical Diversity Over Time (TTR)|height=400px|>
-
-## Speech Types Distribution  
-<|{filtered_data}|chart|type=histogram|x=speech_type|title=Speech Types Distribution|height=400px|>
-
-## Sentiment Distribution  
-<|{filtered_data}|chart|type=histogram|x=sentiment_category|title=Sentiment Distribution|height=400px|>
-
-## Readability Distribution  
-<|{filtered_data}|chart|type=histogram|x=readability_category|title=Readability Distribution|height=400px|>
-
-## Lexical Diversity Distribution  
-<|{filtered_data}|chart|type=histogram|x=lexical_diversity_category|title=Lexical Diversity Distribution|height=400px|>
-|>
-|>
-"""
-
-# Create the Taipy GUI instance with production configuration
-gui = Gui(page)
-
-# Configure Taipy for production
-from taipy import Config
-
-Config.configure_data_node(
-    "default", storage_type="memory"
-)  # Use memory storage for better performance
-
-if __name__ == "__main__":
-    # Production settings for Taipy
-    gui.run(
-        debug=False,
-        port=5000,
-        host="0.0.0.0",
-        use_reloader=False,  # Disable auto-reloader for production
-        allow_unsafe_werkzeug=True,  # Allow Werkzeug in production (needed for Docker)
-        threaded=True,  # Enable threading for better performance
-        run_server=True,  # Explicitly run the server
-        watermark="",  # Remove Taipy watermark for cleaner UI
-    )
+        if "lexical_diversity_category" in filtered_data.columns:
+            lexical_order = ["Very High", "High", "Moderate", "Low", "Very Low"]
+            if use_color:
+                rows = []
+                for president in selected_presidents:
+                    president_data = filtered_data[filtered_data["name"] == president]
+                    counts = president_data["lexical_diversity_category"].value_counts()
+                    for cat in lexical_order:
+                        rows.append({"lexical_diversity_category": cat, "count": counts.get(cat, 0), "name": president})
+                lexical_df = pd.DataFrame(rows)
+                fig = px.bar(
+                    lexical_df, x="lexical_diversity_category", y="count", color="name",
+                    color_discrete_sequence=COLORBLIND_PALETTE,
+                    title="Lexical Diversity Distribution", barmode="group"
+                )
+            else:
+                counts = filtered_data["lexical_diversity_category"].value_counts()
+                lexical_df = pd.DataFrame({
+                    "lexical_diversity_category": lexical_order,
+                    "count": [counts.get(cat, 0) for cat in lexical_order]
+                })
+                fig = px.bar(lexical_df, x="lexical_diversity_category", y="count", title="Lexical Diversity Distribution")
+            fig.update_layout(xaxis_title="Lexical Diversity Category", yaxis_title="Count")
+            st.plotly_chart(fig, use_container_width=True)

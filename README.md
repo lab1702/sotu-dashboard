@@ -1,8 +1,8 @@
 # Presidential Speech Analysis Dashboard
 
-A comprehensive, containerized web application for analyzing U.S. presidential speeches with advanced natural language processing, built with Taipy and optimized for production deployment.
+A comprehensive, containerized web application for analyzing U.S. presidential speeches with advanced natural language processing, built with Streamlit and optimized for production deployment.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Docker Deployment (Recommended)
 
@@ -24,19 +24,21 @@ pip install -r requirements.txt
 python sotu_downloader_script.py
 
 # Run the dashboard
-python dashboard.py
+streamlit run dashboard.py --server.port 5000
 ```
 
-## 📊 Features
+## Features
 
 ### Interactive Analytics Dashboard
-- **Multi-dimensional Filtering**: President, decade, speech type, political party, sentiment, readability, lexical diversity
+- **Tabbed Interface**: Organized into Data Table, Time Trends, and Distributions tabs
+- **Multi-select President Filter**: Compare multiple presidents side-by-side
+- **Multi-dimensional Filtering**: Decade, speech type, political party, sentiment, readability, lexical diversity
 - **Real-time Statistics**: Total speeches, date ranges, average word counts, president counts
-- **Responsive Design**: Optimized for desktop and mobile viewing
+- **Colorblind-safe Palette**: Accessible visualizations using the Wong (2011) color palette
 
 ### Natural Language Processing
 - **Sentiment Analysis**: Polarity and subjectivity scoring using TextBlob
-- **Readability Metrics**: 
+- **Readability Metrics**:
   - Flesch Reading Ease
   - Flesch-Kincaid Grade Level
   - Gunning Fog Index
@@ -47,47 +49,45 @@ python dashboard.py
   - Measure of Textual Lexical Diversity (MTLD)
 
 ### Data Visualizations
-- **Time Series Analysis**: Word count, sentiment, and readability trends over time
-- **Distribution Charts**: Speech types, sentiment categories, readability levels
-- **Interactive Tables**: Sortable, paginated speech data with key metrics
+- **Time Series Analysis**: Word count, sentiment, readability, and lexical diversity trends over time
+- **Distribution Charts**: Speech types, sentiment categories, readability levels, lexical diversity
+- **President Comparison**: Color-coded charts for comparing multiple presidents
+- **Interactive Tables**: Sortable, filterable speech data with key metrics
 
-## 📁 Project Structure
+## Project Structure
 
 ```
-sotu-downloader/
-├── dashboard.py              # Main Taipy dashboard application
-├── app.py                   # WSGI wrapper (legacy)
+sotu-dashboard/
+├── dashboard.py              # Main Streamlit dashboard application
 ├── sotu_downloader_script.py # Data collection script
-├── requirements.txt         # Python dependencies
-├── gunicorn.conf.py        # Production server configuration
-├── Dockerfile              # Container configuration
-├── docker-compose.yml      # Multi-container orchestration
-├── presidential_speeches/   # JSON data files (1,055+ speeches)
-└── README.md               # This file
+├── requirements.txt          # Python dependencies
+├── Dockerfile                # Container configuration
+├── docker-compose.yml        # Multi-container orchestration
+├── .gitignore                # Git ignore rules
+├── presidential_speeches/    # JSON data files (downloaded, not in git)
+└── README.md                 # This file
 ```
 
-## 🛠 Technical Stack
+## Technical Stack
 
 ### Backend
 - **Python 3.12**: Core runtime environment
-- **Taipy**: Web framework for data applications
+- **Streamlit**: Web framework for data applications
 - **DuckDB**: High-performance analytical database
 - **Pandas**: Data manipulation and analysis
 - **TextBlob**: Natural language processing
 - **TextStat**: Readability analysis
 
 ### Frontend
-- **Taipy GUI**: Interactive web components
-- **Plotly**: Data visualization charts
-- **Responsive CSS**: Mobile-friendly design
+- **Streamlit**: Interactive web components and layout
+- **Plotly**: Interactive data visualization charts
 
 ### Infrastructure
 - **Docker**: Containerization
-- **Production-optimized Taipy server**: Multi-threaded, production-ready configuration
 - **Health checks**: Automated container monitoring
 - **Resource optimization**: Memory and CPU efficient processing
 
-## 📊 Dataset
+## Dataset
 
 ### Coverage
 - **1,055+ Presidential Speeches** (1789-1933)
@@ -102,20 +102,14 @@ sotu-downloader/
 - **Real-time NLP Analysis**: Sentiment, readability, and lexical diversity calculated on startup
 - **Efficient Storage**: JSON format optimized for DuckDB queries
 - **Data Validation**: Input sanitization and error handling
+- **Caching**: Streamlit caching for faster subsequent loads
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 ```bash
 PYTHONUNBUFFERED=1    # Real-time logging
-TAIPY_PORT=5000       # Application port
 ```
-
-### Production Settings
-- **Multi-threading enabled** for concurrent user handling
-- **Memory optimization** with efficient data processing
-- **Graceful error handling** with fallback values
-- **Health monitoring** with Docker health checks
 
 ### Performance Tuning
 ```python
@@ -125,15 +119,15 @@ MATTR_WINDOW_SIZE = 100          # Lexical diversity window
 SENTIMENT_THRESHOLDS = ±0.1      # Sentiment classification
 ```
 
-## 📈 Usage Examples
+## Usage Examples
 
 ### Data Querying with DuckDB
 ```sql
 -- Query all speeches
-SELECT unnest(COLUMNS(*)) FROM 'presidential_speeches/[0-9]*.json';
+SELECT * FROM 'presidential_speeches/[0-9]*.json';
 
 -- Filter by president and year
-SELECT * FROM 'presidential_speeches/*.json' 
+SELECT * FROM 'presidential_speeches/*.json'
 WHERE name = 'Abraham Lincoln' AND year > 1860;
 ```
 
@@ -143,22 +137,19 @@ import duckdb
 
 # Load and analyze data
 conn = duckdb.connect(':memory:')
-query = "SELECT unnest(COLUMNS(*)) FROM 'presidential_speeches/[0-9]*.json'"
+query = "SELECT * FROM 'presidential_speeches/[0-9]*.json'"
 df = conn.execute(query).df()
 
 # Calculate custom metrics
 df['word_density'] = df['word_count'] / df['character_count']
 ```
 
-## 🚢 Deployment
+## Deployment
 
 ### Container Management
 ```bash
 # View logs
 docker-compose logs -f
-
-# Scale horizontally
-docker-compose up --scale sotu-dashboard=3
 
 # Stop services
 docker-compose down
@@ -171,16 +162,15 @@ docker-compose down && docker-compose up --build -d
 - **Resource Limits**: Configure memory/CPU limits in docker-compose.yml
 - **Load Balancing**: Use nginx for multiple container instances
 - **Monitoring**: Implement logging and metrics collection
-- **Security**: Network isolation and resource constraints
 
-## 📚 API Reference
+## API Reference
 
 ### Core Functions
 
 #### Data Loading
 ```python
 load_speech_data() -> pd.DataFrame
-# Loads and processes all presidential speech data
+# Loads and processes all presidential speech data (cached)
 ```
 
 #### Analysis Functions
@@ -197,11 +187,11 @@ calculate_lexical_diversity(text: str) -> Tuple[float, float, float]
 
 #### Filtering
 ```python
-apply_all_filters(df, president, decade, speech_type, party, sentiment, readability, lexical_diversity) -> pd.DataFrame
+apply_filters(df, presidents, decade, speech_type, party, sentiment, readability, lexical_diversity) -> pd.DataFrame
 # Applies comprehensive filtering to dataset
 ```
 
-## 🧪 Testing
+## Testing
 
 ### Data Validation
 ```bash
@@ -215,46 +205,15 @@ python -c "from dashboard import calculate_sentiment; print(calculate_sentiment(
 ### Container Testing
 ```bash
 # Health check
-curl http://localhost:5000/
+curl http://localhost:5000/_stcore/health
 
 # Performance test
 docker stats presidential-speech-dashboard
 ```
 
-## 🤝 Contributing
+## Resources
 
-### Development Setup
-1. Fork the repository
-2. Create a feature branch
-3. Install dependencies: `pip install -r requirements.txt`
-4. Make changes with comprehensive testing
-5. Submit a pull request
-
-### Code Standards
-- **Type hints** for all function parameters
-- **Docstrings** for public functions
-- **Error handling** with graceful degradation
-- **Security validation** for all inputs
-
-## 📄 License
-
-This project analyzes public domain presidential speeches. The analysis code and dashboard are available for educational and research purposes.
-
-## 🔗 Resources
-
-- [Taipy Documentation](https://docs.taipy.io/)
+- [Streamlit Documentation](https://docs.streamlit.io/)
 - [Miller Center Presidential Speeches](https://millercenter.org/the-presidency/presidential-speeches)
 - [TextBlob Documentation](https://textblob.readthedocs.io/)
 - [DuckDB Documentation](https://duckdb.org/docs/)
-
-## 🐛 Support
-
-For issues, feature requests, or questions:
-1. Check existing documentation
-2. Review container logs: `docker-compose logs`
-3. Test with local development setup
-4. Submit detailed issue reports with reproduction steps
-
----
-
-**Built with ❤️ for presidential speech analysis and democratic transparency.**
